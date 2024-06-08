@@ -1,0 +1,572 @@
+---
+title: "ours_MERFISH"
+author: "xiaoguo"
+date: "2023/12/19"
+output: html_document
+---
+```{r}
+setwd('D:/st/experiment/Comparative/datasets/MERFISH/')
+```
+
+##Read the single-cell reference set information to obtain the single-cell gene expression matrix and the cell type information of each cell
+```{r}
+sc_exp = read.table('raw_somatosensory_sc_exp.txt',header = T,row.names = 1)
+sc_anno = read.table('somatosensory_sc_labels.txt',header = F)
+```
+
+##Read simulated spatial transcriptome data
+```{r}
+simMERFISH_100 <- readRDS("D:/st/experiment/STdeconv_benchmark-main/10184476/MERFISH/simMERFISH_100.RDS")
+```
+
+##Process the data to obtain the count and coordinate information of the ST data
+```{r}
+data_count<-simMERFISH_100$sim
+sparse_mat <- sparseMatrix(i = data_count$i, j = data_count$j, x = data_count$v, dims = c(data_count$nrow, data_count$ncol))
+count<-as.matrix(sparse_mat)
+rownames(count)<-simMERFISH_100$sim$dimnames[[1]]
+colnames(count)<-simMERFISH_100$sim$dimnames[[2]]
+rm(data_count)
+rm(sparse_mat)
+```
+##The actual cell type ratio corresponding to each spot
+```{r}
+truth<-simMERFISH_100$gtSpotTopics
+st_location<-simMERFISH_100$st_location
+```
+
+##Load the required packages
+```{r}
+library(Matrix)
+library(Biobase)
+library(Seurat)
+library(SeuratData)
+library(SeuratDisk)
+library(MCMCpack)
+library(CARD)
+```
+
+```{r}
+org_st_count<-sampled_matrix
+rm(count)
+
+spatial_location=st_location[,c("X","Y")]
+colnames(spatial_location) = c('x','y')
+locations=spatial_location
+rm(st_location)
+
+sc_count = Matrix(as.matrix(sc_exp),sparse = TRUE)
+
+sc_meta = data.frame(matrix(ncol = 3,nrow = ncol(sc_exp)))
+colnames(sc_meta) = c('cellID','cellType','sampleInfo')
+
+sc_meta$sampleInfo = "sample1"
+sc_meta$cellType = sc_anno$V1
+sc_meta$cellID = colnames(sc_count)
+rownames(sc_meta) = sc_meta$cellID
+```
+
+
+
+##Filter data with common genes to perform KMM transformation
+```{r}
+##Behavioral genes, listed as cells
+org_st_count<-as.data.frame(t(org_st_count))
+st_gene<-rownames(org_st_count)
+
+sc_gene<-rownames(sc_count)
+
+commongenes<-intersect(sc_gene,st_gene)
+
+sc_count_common<-sc_count[commongenes, ]
+spatial_count_common<-org_st_count[commongenes,]
+```
+
+```{r}
+##scRNA-seq converted to seurat object
+cell_seurat<-CreateSeuratObject(counts=log(sc_count_common+1),project="single_cell")
+#cell_seurat<-CreateSeuratObject(counts=exprs(sc),project="cell_line",min.cells = 3,min.features =200)
+cell_seurat<-NormalizeData(cell_seurat,verbose = FALSE) ##normalize是因为用单细胞normalize的数据
+#cell_seurat@meta.data$celltype<-pData(sc)$clustername
+```
+
+```{r}
+##Convert ST to seurat object
+colsumvec = colSums(spatial_count_common)
+spatial_count_common_norm = sweep(spatial_count_common,2,colsumvec,"/")
+#spatial_count_common_norm<-as.matrix(spatial_count_common)
+st_seurat<-CreateSeuratObject(counts=spatial_count_common_norm,project="st")
+#st_seurat<-NormalizeData(st_seurat,verbose = FALSE)
+```
+
+
+```{r}
+##Convert each into an h5ad object for KMM conversion
+cell_seurat@active.assay <- "RNA"
+SaveH5Seurat(cell_seurat, filename <-  "cell_seurat_20.h5Seurat")
+Convert("cell_seurat_20.h5Seurat", dest <-  "cell_seurat_20.h5ad")
+
+st_seurat@active.assay <- "RNA"
+SaveH5Seurat(st_seurat, filename <-  "st_seurat_20.h5Seurat")
+Convert("st_seurat_20.h5Seurat", dest <-  "st_seurat_20.h5ad")
+```
+
+
+```{r}
+Idents(cell_seurat)<-"cellType"
+```
+
+```{r}
+
+data<-contribute(cell_seurat,beta = 0.1,mu=0.9,t=1) ##Obtain single cell cell-specific expression matrix
+#t<-deconv_simple(as.matrix(Yjg),as.matrix(data),nu = 1e-9 ,epsilon = 0.001) ##Deconvolution
+```
+
+
+```{r}
+	ct.select = unique(sc_meta$cellType)
+```
+
+
+```{r}
+cat(paste0("## create reference matrix from scRNASeq...\n"))
+
+##Creating cell-specific expression matrices
+Basis=contribute(cell_seurat,beta = 0.1,mu=1.2,t=1)
+```
+
+
+##Plus KMM conversion
+```{r}
+beta<-read.csv("beta_50.csv",header = F)
+beta<-t(beta)
+```
+
+```{r}
+org_st_count_kmm<-org_st_count
+for(i in 1:dim(org_st_count)[1]){
+  org_st_count_kmm[i,]<-org_st_count[i,]*as.matrix(beta)
+}
+
+```
+
+```{r}
+##Extraction of selected cell types
+Basis = Basis[,colnames(Basis) %in% ct.select]
+Basis = Basis[,match(ct.select,colnames(Basis))]
+spatial_count=org_st_count_kmm
+
+##Common genes between scRNA-seq and ST
+commonGene = intersect(rownames(spatial_count),rownames(Basis))
+
+common=commonGene
+
+Xinput = spatial_count
+
+rm(spatial_count)
+
+B = Basis
+
+##Replace the INF value
+# Traverse each column
+for (col in 1:ncol(B)) {
+ # Replace INF values ​​with NA
+  B[is.infinite(B[, col]), col] <- 1.798e+307
+}
+
+
+rm(Basis)
+
+
+##### match the common gene names
+Xinput = Xinput[order(rownames(Xinput)),]
+B = B[order(rownames(B)),]
+B = B[rownames(B) %in% common,]
+Xinput = Xinput[rownames(Xinput) %in% common,]
+
+
+##### filter out non expressed genes or cells again
+Xinput = Xinput[rowSums(Xinput) > 0,]
+Xinput = Xinput[,colSums(Xinput) > 0]
+
+B = B[rowSums(B) > 0,]
+B = B[,colSums(B) > 0]
+
+##### normalize count data
+colsumvec = colSums(Xinput)
+Xinput_norm = sweep(Xinput,2,colsumvec,"/")
+
+#for(i in 1:dim(Xinput_norm)[1]){
+ # Xinput_norm[i,]<-Xinput_norm[i,]*as.matrix(beta)
+#}
+#Xinput_norm <- LogNormalize(data = Xinput_norm)
+Xinput_norm<-as.matrix(Xinput_norm)
+
+B = B[rownames(B) %in% rownames(Xinput_norm),]    
+B = B[match(rownames(Xinput_norm),rownames(B)),]
+
+#### spatial location
+spatial_location = locations
+spatial_location = spatial_location[rownames(spatial_location) %in% colnames(Xinput_norm),]
+spatial_location = spatial_location[match(colnames(Xinput_norm),rownames(spatial_location)),]
+
+
+##### normalize the coordinates without changing the shape and relative position
+norm_cords = spatial_location[ ,c("x","y")]
+norm_cords$x = norm_cords$x - min(norm_cords$x)
+norm_cords$y = norm_cords$y - min(norm_cords$y)
+scaleFactor = max(norm_cords$x,norm_cords$y)
+norm_cords$x = norm_cords$x / scaleFactor
+norm_cords$y = norm_cords$y / scaleFactor
+
+##Calculate the distance matrix
+library(fields)
+library(proxy)
+##### initialize the proportion matrix
+ED <- rdist(as.matrix(norm_cords))##Euclidean distance matrix
+```
+
+
+
+
+```{r}
+cat(paste0("## Deconvolution Starts! ...\n"))
+set.seed(20231107)
+Vint1 = as.matrix(rdirichlet(ncol(Xinput_norm), rep(10,ncol(B))))
+colnames(Vint1) = colnames(B)
+rownames(Vint1) = colnames(Xinput_norm)
+b = rep(0,length(ct.select))
+
+
+###### parameters that need to be set
+isigma = 0.1 ####construct Gaussian kernel with the default scale /length parameter to be 0.1
+epsilon = 1e-06  #### convergence epsion 
+phi = c(0.01,0.1,0.3,0.5,0.7,0.9,0.99) #### grided values for phi
+kernel_mat <- exp(-ED^2 / (2 * isigma^2))
+diag(kernel_mat) <- 0
+```
+
+
+```{r}
+rm(ED)
+rm(Xinput)
+rm(norm_cords)
+gc()
+
+
+###### scale the Xinput_norm and B to speed up the convergence. 
+mean_X = mean(Xinput_norm)
+B1=B
+B1=as.matrix(B)
+for(col in names(B1)){
+  B1[[col]]<-as.numeric(B1[[col]])
+}
+
+
+delete_cells_index = which(is.na(B1[,1]))
+B1 = B1[-delete_cells_index,]
+
+mean_B = mean(B1)
+
+B=B1
+
+Xinput_norm = 0.95*Xinput_norm * 1e-01 / mean_X
+B = B * 1e-01 / mean_B
+
+commonGene = intersect(rownames(Xinput_norm),rownames(B))
+common=commonGene
+
+Xinput_norm = Xinput_norm[order(rownames(Xinput_norm)),]
+B = B[order(rownames(B)),]
+B = B[rownames(B) %in% common,]
+Xinput_norm = Xinput_norm[rownames(Xinput_norm) %in% common,]
+
+Xinput_norm=0.88*Xinput_norm
+
+gc()
+
+
+
+ResList = list()
+Obj = c()
+for(iphi in 1:length(phi)){
+res = CARDref(
+  XinputIn = as.matrix(Xinput_norm),
+  UIn = as.matrix(B),
+  WIn = kernel_mat, 
+  phiIn = phi[iphi],
+  max_iterIn =1000,
+  epsilonIn = epsilon,
+  initV = Vint1,
+  initb = rep(0,ncol(B)),
+  initSigma_e2 = 0.1, 
+  initLambda = rep(10,length(ct.select)))
+
+rownames(res$V) = colnames(Xinput_norm)
+colnames(res$V) = colnames(B)
+ResList[[iphi]] = res
+Obj = c(Obj,res$Obj)
+}
+
+Optimal = which(Obj == max(Obj))
+Optimal = Optimal[length(Optimal)] #### just in case if there are two equal objective function values
+OptimalPhi = phi[Optimal]
+OptimalRes = ResList[[Optimal]]
+cat(paste0("## Deconvolution Finish! ...\n"))
+```
+
+##Get the cell type ratio
+```{r}
+pro<- sweep(OptimalRes$V,1,rowSums(OptimalRes$V),"/")
+#print(CARD_object@Proportion_CARD[1:2,])
+pro
+     
+```
+
+```{r}
+write.csv(pro, 'D:/st/experiment/Comparative/datasets/MERFISH/results/ours_MERFISH_100.csv')
+```
+
+
+```{r}
+###############################################
+##contribute Obtain cell-specific expression matrix
+#' Evaluate deconvolved proportions
+#' @name contribute
+#' @export
+contribute <- function(object, orig.ident="celltype",beta = 0.15,mu=1,t=1){
+  library(Seurat)
+  ##Get average expression
+  Idents(object)<-orig.ident ##This step can specify which group's average expression is to be calculated. You can select cell type (cell type) cluster (seurat_cluster) or sample type (orig.ident)
+  AverageExp <- AverageExpression(object)
+  gepsdf <- as.data.frame(AverageExp$RNA) ##Get the average expression level of data data in RNA
+  
+  collength<-length(gepsdf[1,]) ##Determine how many data types there are
+  
+  ##Get the contribution of each gene
+  marker_cosbeta<-cosgbeta(
+  object,
+  groups='all',
+  assay='RNA',
+  slot='data',
+  beta = beta,
+  mu=mu,
+  t=t)
+
+  
+ celltype<-colnames(gepsdf)
+ collength<-length(gepsdf[1,]) ##Determine how many data types there are
+ genes<-rownames(gepsdf)
+ rowlength<-length(genes)  ##Determine how many genes there are in total
+
+ ##Determine differential gene names and scores
+  features=list()
+  scores=list()
+ ##final output matrix
+ m=data.frame(matrix(matrix(), rowlength, collength, dimnames=list(seq(1,rowlength), celltype)),
+                     stringsAsFactors=F)
+
+  for(i in 1:collength){
+    
+    features[[i]]<-marker_cosbeta$names[,i]
+    features[[i]]=subset( features[[i]], features[[i]]!="NA")
+
+    scores[[i]]<-marker_cosbeta$scores[,i]
+    scores[[i]]=subset( scores[[i]], scores[[i]]!="NA")
+      
+    df<-as.data.frame(scores[[i]])
+    rownames(df)<-features[[i]]
+    colnames(df)<-c('score')
+    
+    df1<-as.data.frame(gepsdf[,i])
+    rownames(df1)<-genes
+    colnames(df1)<-c('gene')
+    df1[,1]<-0
+    
+    for (j in 1:length(features[[i]])){
+      #print(features1[j])
+  df1$gene[which(rownames(df1) ==features[[i]][j])] <- df$score[which(rownames(df) ==features[[i]][j])] 
+  }
+
+   m[,i]<-as.matrix(df1)
+   m[,i]<-1+log(1/(1-m[,i]))
+   m[,i]<-as.data.frame(m[,i])
+   
+  }
+ 
+ rownames(m)<-genes
+ colnames(m)<-colnames(marker_cosbeta$names)
+
+ m<-m[intersect(rownames(m),genes),intersect(colnames(m),celltype)]
+ 
+ data<-as.data.frame(as.matrix(m)*gepsdf)
+ 
+ return(data)
+ 
+
+}
+```
+
+
+```{r}
+##beta sets the threshold, the threshold of difference scores scores
+select_beta<-function(scores,beta){
+  scores<-
+  d <- data.frame(
+    x   = data.table::copy(scores),
+    indice=seq(1,length(scores)))
+
+  data.table::setDT(d) ##A conversion operation on data frame d to prevent stack overflow
+  data.table::setorder(d,-x) ##Sort descending
+  d<-d[d$x>=beta,]
+  n_top_indice<-d$indice
+  return(n_top_indice)
+}
+
+cosgbeta<-function(
+    object,
+    groups='all',
+    assay='RNA',
+    slot='data',
+    mu=1,
+    remove_lowly_expressed=TRUE,
+    expressed_pct=0.1,
+    #n_genes_user=1000,
+    beta=0.25,
+    t=1
+){
+   
+    ### Obtain the cellxgene data
+    genexcell<-Seurat::GetAssayData(object = object[[assay]], slot = slot)
+     
+    ##grroup_info Get group information
+    if (groups == 'all'){
+        group_info <- Seurat::Idents(object = object)
+    }else{ 
+        object <- subset(x = object, idents = groups)
+        group_info <- Seurat::Idents(object = object)
+    }
+    
+
+    ### unique groups
+    groups_order=sort(unique(group_info))
+    n_cluster=length(groups_order)
+
+    if (n_cluster == 1){
+        stop('Cannot perform marker gene identification on a single cluster.')}
+    
+
+    n_cell=ncol(genexcell)
+    n_gene=nrow(genexcell)
+    gene_name=rownames(genexcell)
+    
+    # ### If sepcifying too many genes to return
+    # if (n_genes_user>n_gene){
+    #     n_genes_user=n_gene
+    # }
+
+    ##cluster_mat matrix Ideal marker gene expression matrix
+    cluster_mat=matrix(0,nrow =n_cluster,ncol = n_cell)
+
+    order_i=1
+    ### Set gene lambda and gene omega
+    for (group_i in groups_order){
+        idx_i=group_info==group_i 
+        cluster_mat[order_i,idx_i]=1
+        order_i=order_i+1
+    }
+
+
+    cluster_mat_sparse=as(cluster_mat, "dgCMatrix")
+    ### Calculate the cosine similarity
+    ##The cosine similarity value of each gene to the ideal gene in each cluster dim=gene*cluster
+    cosine_sim=proxyC::simil(genexcell,cluster_mat_sparse, method = "cosine",drop0=TRUE)
+    
+    ##Because division is done below, first clear the ones that are 0.
+    pos_nonzero = cosine_sim != 0 ##Record non-zero values
+    pos_nonzero=which(as.matrix(pos_nonzero),arr.ind = TRUE)  ##Convert non-zero values in the matrix into indicator vectors. The first column corresponds to the row name and the second column corresponds to the column name.
+    
+    #### Second-stage
+    if(t==1){
+    genexlambda=cosine_sim #*cosine_sim
+    }else{
+      genexlambda=cosine_sim *cosine_sim
+    }
+    e_power2_sum=Matrix::rowSums(genexlambda)
+
+    ##Normalization of the proportion of genes in the corresponding group
+    if (mu==1){
+         genexlambda[pos_nonzero]=genexlambda[pos_nonzero]/(replicate(ncol(genexlambda),e_power2_sum)[as.matrix(pos_nonzero)])
+    }else{
+        genexlambda[pos_nonzero]=genexlambda[pos_nonzero]/((
+            (1-mu)*genexlambda[pos_nonzero] + mu * (replicate(ncol(genexlambda),e_power2_sum)[as.matrix(pos_nonzero)])
+        ))
+    }
+
+    genexlambda=genexlambda*cosine_sim
+
+    # rank_stats_names=data.frame(matrix(matrix(), n_genes_user, length(groups_order),
+    #                     dimnames=list(seq(1,n_genes_user), groups_order)),
+    #                     stringsAsFactors=F)
+    # rank_stats_scores=data.frame(matrix(matrix(), n_genes_user, length(groups_order),
+    #                     dimnames=list(seq(1,n_genes_user), groups_order)),
+    #                     stringsAsFactors=F)
+    
+   a<-list()
+   b<-list()
+   
+    order_i=1
+    ### Set gene lambda and gene omega
+    for (group_i in groups_order){
+        idx_i=group_info==group_i 
+        scores=genexlambda[,order_i]
+      
+        ### Mask these genes expressed in less than given percentage of cells in the cluster of interest
+        if(remove_lowly_expressed){
+            # https://stackoverflow.com/questions/51560456/r-package-matrix-get-number-of-non-zero-entries-per-rows-columns-of-a-sparse
+            n_cells_expressed=tabulate(genexcell[,idx_i]@i + 1) ##Count the number of occurrences of each gene in each cluster
+            n_cells_i=sum(idx_i)  ##number of cells in each clusterMask these genes that are expressed in less than a given percentage of cells in the target cluster. These are error genes. That is to say, if this gene is a marker gene for this cluster, it must first be expressed in at least 10% of the cells in this cluster.
+        }
+                global_indices = select_beta(scores, beta)  ##golobal_indices is to get the subscripts of the top (n_genes_user) genes after arranging the scores in descending order.
+     
+       rank_stats_names=data.frame(matrix(matrix(), length(global_indices), 1,
+                        dimnames=list(seq(1,length(global_indices)), 1)),
+                        stringsAsFactors=F)
+      
+       rank_stats_scores=data.frame(matrix(matrix(), length(global_indices), 1,
+                        dimnames=list(seq(1,length(global_indices)), 1)),
+                        stringsAsFactors=F)
+        
+        rank_stats_names[,1]=gene_name[global_indices] ##Top gene names
+        rank_stats_scores[,1]=scores[global_indices]  ##Top scores
+      
+        a[[group_i]]<-as.matrix(rank_stats_names)
+        b[[group_i]]<-as.matrix(rank_stats_scores)
+        ### save the group names
+        order_i=order_i+1
+    }
+
+    a<- as.data.frame(do.call(cbind, lapply(lapply(a, unlist), `length<-`, max(lengths(a)))))
+    b<- as.data.frame(do.call(cbind, lapply(lapply(b, unlist), `length<-`, max(lengths(b)))))
+    colnames(a) <- groups_order ##Corresponding cluster name
+    colnames(b) <- groups_order
+    
+    # ###Get the name and score of a cluster's marker gene
+    # ranks_stats=list(
+    #     names=rank_stats_names,
+    #     scores=rank_stats_scores
+    # 
+    # )
+    
+        ###Get the name and score of a cluster's marker gene
+    ranks_stats=list(
+        names=a,
+        scores=b
+
+    )
+    ### return
+    return(ranks_stats)
+}
+
+
+```

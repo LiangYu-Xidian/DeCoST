@@ -86,7 +86,7 @@ spatial_count_common<-org_st_count[commongenes,]
 ##scRNA-seq converted to seurat object
 cell_seurat<-CreateSeuratObject(counts=log(sc_count_common+1),project="single_cell")
 #cell_seurat<-CreateSeuratObject(counts=exprs(sc),project="cell_line",min.cells = 3,min.features =200)
-cell_seurat<-NormalizeData(cell_seurat,verbose = FALSE) ##normalize是因为用单细胞normalize的数据
+cell_seurat<-NormalizeData(cell_seurat,verbose = FALSE) ##normalize
 #cell_seurat@meta.data$celltype<-pData(sc)$clustername
 ```
 

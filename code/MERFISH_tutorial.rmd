@@ -103,12 +103,12 @@ st_seurat<-CreateSeuratObject(counts=spatial_count_common_norm,project="st")
 ```{r}
 ##Convert each into an h5ad object for KMM conversion
 cell_seurat@active.assay <- "RNA"
-SaveH5Seurat(cell_seurat, filename <-  "cell_seurat_20.h5Seurat")
-Convert("cell_seurat_20.h5Seurat", dest <-  "cell_seurat_20.h5ad")
+SaveH5Seurat(cell_seurat, filename <-  "cell_seurat_100.h5Seurat")
+Convert("cell_seurat_100.h5Seurat", dest <-  "cell_seurat_100.h5ad")
 
 st_seurat@active.assay <- "RNA"
-SaveH5Seurat(st_seurat, filename <-  "st_seurat_20.h5Seurat")
-Convert("st_seurat_20.h5Seurat", dest <-  "st_seurat_20.h5ad")
+SaveH5Seurat(st_seurat, filename <-  "st_seurat_100.h5Seurat")
+Convert("st_seurat_100.h5Seurat", dest <-  "st_seurat_100.h5ad")
 ```
 
 
@@ -138,7 +138,7 @@ Basis=contribute(cell_seurat,beta = 0.1,mu=1.2,t=1)
 
 ##Plus KMM conversion
 ```{r}
-beta<-read.csv("beta_50.csv",header = F)
+beta<-read.csv("beta_100.csv",header = F)
 beta<-t(beta)
 ```
 
